@@ -38,6 +38,8 @@ class ChatViewModel extends ChangeNotifier {
 
   Timer? _speechDebounceTimer;
   String _bufferedSpeech = "";
+  String _lastRawResult = "";
+  DateTime _lastResultTimestamp = DateTime.fromMillisecondsSinceEpoch(0);
 
   ChatViewModel({
     required this.schemaRepo,
@@ -60,6 +62,7 @@ class ChatViewModel extends ChangeNotifier {
     _speechDebounceTimer?.cancel();
     _bufferedSpeech = "";
     currentPartialSpeech = "";
+    _lastRawResult = "";
     if (isListening) {
       // Silenciar temporalmente el micrófono de Vosk mientras el altavoz habla
       // para evitar el ciclo de retroalimentación acústica
@@ -124,6 +127,7 @@ class ChatViewModel extends ChangeNotifier {
     _speechDebounceTimer?.cancel();
     _bufferedSpeech = "";
     currentPartialSpeech = "";
+    _lastRawResult = "";
 
     _isProcessing = true;
     lastUserCommandText = clean;
@@ -164,6 +168,7 @@ class ChatViewModel extends ChangeNotifier {
       final pending = _bufferedSpeech.trim();
       _bufferedSpeech = "";
       currentPartialSpeech = "";
+      _lastRawResult = "";
       isListening = false;
       await audioService.stopListening();
       notifyListeners();
@@ -175,9 +180,14 @@ class ChatViewModel extends ChangeNotifier {
       isListening = true;
       _bufferedSpeech = "";
       currentPartialSpeech = "";
+      _lastRawResult = "";
       notifyListeners();
 
       await _startVoskListeningInternal();
+      if (!audioService.isListening) {
+        isListening = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -185,7 +195,7 @@ class ChatViewModel extends ChangeNotifier {
     await audioService.startListening(
       onPartial: (partial) {
         if (!isListening || isAssistantSpeaking) return;
-        currentPartialSpeech = _bufferedSpeech.isEmpty ? partial : "$_bufferedSpeech $partial";
+        currentPartialSpeech = mergeUtterances(_bufferedSpeech, partial);
         notifyListeners();
       },
       onResult: (resultText) {
@@ -194,27 +204,79 @@ class ChatViewModel extends ChangeNotifier {
     );
   }
 
+  /// Combina de forma inteligente hipótesis continuas o secuenciales sin duplicar ni triplicar palabras
+  static String mergeUtterances(String existing, String incoming) {
+    final e = existing.trim();
+    final inc = incoming.trim();
+    if (e.isEmpty) return inc;
+    if (inc.isEmpty) return e;
+    if (e.toLowerCase() == inc.toLowerCase()) return e;
+
+    // Si incoming ya incluye existing como prefijo, incoming es la transcripción completa corregida
+    if (inc.toLowerCase().startsWith(e.toLowerCase())) {
+      return inc;
+    }
+
+    // Si existing ya termina con incoming, incoming es un eco redundante
+    if (e.toLowerCase().endsWith(inc.toLowerCase())) {
+      return e;
+    }
+
+    final existingWords = e.split(RegExp(r'\s+'));
+    final incomingWords = inc.split(RegExp(r'\s+'));
+
+    // Búsqueda de solapamiento de sufijo de existing con prefijo de incoming
+    int maxOverlap = 0;
+    final maxCheck = existingWords.length < incomingWords.length ? existingWords.length : incomingWords.length;
+    for (int i = 1; i <= maxCheck; i++) {
+      bool match = true;
+      for (int j = 0; j < i; j++) {
+        if (existingWords[existingWords.length - i + j].toLowerCase() != incomingWords[j].toLowerCase()) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        maxOverlap = i;
+      }
+    }
+
+    if (maxOverlap > 0) {
+      final nonOverlapping = incomingWords.sublist(maxOverlap).join(' ');
+      if (nonOverlapping.isEmpty) return e;
+      return '$e $nonOverlapping';
+    }
+
+    return '$e $inc';
+  }
+
   void _handleSpeechResult(String resultText) {
     if (!isListening || isAssistantSpeaking || _isProcessing) return;
     final clean = resultText.trim();
     if (clean.isEmpty) return;
 
-    // Acumular la frase reconocida
-    if (_bufferedSpeech.isEmpty) {
-      _bufferedSpeech = clean;
-    } else {
-      _bufferedSpeech = "$_bufferedSpeech $clean";
+    final now = DateTime.now();
+    // Filtro anti-eco: descartar eventos idénticos emitidos por onResult + onFinalResult
+    if (clean.toLowerCase() == _lastRawResult.toLowerCase() &&
+        now.difference(_lastResultTimestamp).inMilliseconds < 1800) {
+      return;
     }
+    _lastRawResult = clean;
+    _lastResultTimestamp = now;
+
+    // Fusión inteligente para evitar duplicaciones o triplicaciones
+    _bufferedSpeech = mergeUtterances(_bufferedSpeech, clean);
     currentPartialSpeech = _bufferedSpeech;
     notifyListeners();
 
     // End-Of-Utterance debounce timer (900ms)
-    // Permite al usuario hacer pausas naturales sin que se corte a la mitad ni envíe 3 mensajes separados
+    // Permite al usuario hacer pausas naturales sin que se corte a la mitad ni envíe mensajes separados
     _speechDebounceTimer?.cancel();
     _speechDebounceTimer = Timer(const Duration(milliseconds: 900), () async {
       final toSend = _bufferedSpeech.trim();
       _bufferedSpeech = "";
       currentPartialSpeech = "";
+      _lastRawResult = "";
       if (toSend.isNotEmpty && !_isProcessing && !isAssistantSpeaking) {
         await sendUserMessage(toSend);
       }
@@ -225,12 +287,20 @@ class ChatViewModel extends ChangeNotifier {
     _speechDebounceTimer?.cancel();
     _bufferedSpeech = "";
     currentPartialSpeech = "";
+    _lastRawResult = "";
     stateMachine?.reset();
     const cancelMsg = "Operación cancelada.";
     _addAssistantMessage(cancelMsg);
     lastSpokenAssistantText = cancelMsg;
     ttsService.speak(cancelMsg);
     notifyListeners();
+  }
+
+  Future<void> updateBaseUrl(String newUrl) async {
+    final clean = newUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    if (clean.isEmpty) return;
+    schemaRepo.baseUrl = clean;
+    await init();
   }
 
   void toggleTts() {

@@ -3,7 +3,7 @@ import 'package:http/http.dart' as http;
 import '../domain/entity_descriptor.dart';
 
 class SchemaRepository {
-  final String baseUrl;
+  String baseUrl;
 
   SchemaRepository({this.baseUrl = 'http://localhost:8080'});
 
@@ -18,7 +18,7 @@ class SchemaRepository {
       throw Exception('Respuesta HTTP no válida: ${response.statusCode}');
     }
 
-    final Map<String, dynamic> spec = jsonDecode(response.body);
+    final Map<String, dynamic> spec = jsonDecode(utf8.decode(response.bodyBytes));
     return parseOpenApiMap(spec);
   }
 

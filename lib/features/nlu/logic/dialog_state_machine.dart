@@ -32,6 +32,7 @@ class DialogStateMachine {
     text = text.replaceAll(RegExp(r'\b(le|el|de|la)\s+estar\b'), 'listar');
     text = text.replaceAll(RegExp(r'\blestar\b'), 'listar');
     text = text.replaceAll(RegExp(r'\b(lista|listame|listado|listeme)\b'), 'listar');
+    text = text.replaceAll(RegExp(r'\b(dame|dime|trae|traeme|obten|obtene|cuales|cuáles|cuantas|cuántas|cuantos|cuántos)\b'), 'listar');
     text = text.replaceAll(RegExp(r'\b(muestra|muestrame|mostrame|mostra)\b'), 'mostrar');
     text = text.replaceAll(RegExp(r'\b(consulta|consultame|busca|buscame)\b'), 'consultar');
     text = text.replaceAll(RegExp(r'\b(crea|creame)\b'), 'crear');
@@ -480,33 +481,49 @@ class DialogStateMachine {
     return IntentType.unknown;
   }
 
+  static String removeDiacritics(String str) {
+    return str
+        .replaceAll(RegExp(r'[áàäâ]'), 'a')
+        .replaceAll(RegExp(r'[éèëê]'), 'e')
+        .replaceAll(RegExp(r'[íìïî]'), 'i')
+        .replaceAll(RegExp(r'[óòöô]'), 'o')
+        .replaceAll(RegExp(r'[úùüû]'), 'u')
+        .replaceAll(RegExp(r'[ÁÀÄÂ]'), 'A')
+        .replaceAll(RegExp(r'[ÉÈËÊ]'), 'E')
+        .replaceAll(RegExp(r'[ÍÌÏÎ]'), 'I')
+        .replaceAll(RegExp(r'[ÓÒÖÔ]'), 'O')
+        .replaceAll(RegExp(r'[ÚÙÜÛ]'), 'U');
+  }
+
   EntityDescriptor? _resolveEntity(String text) {
-    // 1. Coincidencia exacta de substring
+    final normText = removeDiacritics(text.toLowerCase());
+
+    // 1. Coincidencia exacta de substring (insensible a acentos/diacríticos)
     for (final e in entities) {
-      final name = e.entityName.toLowerCase();
-      final route = e.pluralRoute.toLowerCase();
-      if (text.contains(name) || text.contains(route)) {
+      final name = removeDiacritics(e.entityName.toLowerCase());
+      final route = removeDiacritics(e.pluralRoute.toLowerCase());
+      if (normText.contains(name) || normText.contains(route)) {
         return e;
       }
       // Chequear variaciones de plural y singular
-      if (text.contains('${name}s') || text.contains('${name}es')) {
+      if (normText.contains('${name}s') || normText.contains('${name}es')) {
         return e;
       }
-      if (name.endsWith('s') && text.contains(name.substring(0, name.length - 1))) {
+      if (name.endsWith('s') && normText.contains(name.substring(0, name.length - 1))) {
         return e;
       }
     }
 
     // 2. Coincidencia difusa (Fuzzy Levenshtein) por tokens
-    final words = text.split(RegExp(r'\s+'));
+    final words = normText.split(RegExp(r'\s+'));
     EntityDescriptor? bestMatch;
     double highestScore = 0.0;
 
     for (final word in words) {
       if (word.length < 3) continue;
       for (final e in entities) {
-        final scoreName = _calculateSimilarity(word, e.entityName.toLowerCase());
-        final scoreRoute = _calculateSimilarity(word, e.pluralRoute.toLowerCase());
+        final scoreName = _calculateSimilarity(word, removeDiacritics(e.entityName.toLowerCase()));
+        final scoreRoute = _calculateSimilarity(word, removeDiacritics(e.pluralRoute.toLowerCase()));
         final maxScore = max(scoreName, scoreRoute);
 
         if (maxScore > highestScore && maxScore >= 0.65) {
@@ -548,21 +565,44 @@ class DialogStateMachine {
   }
 
   void _extractSlotsFromText(String text, EntityDescriptor entity) {
+    final otherFieldsPattern = entity.fields.map((f) => RegExp.escape(f.name)).join('|');
     for (final field in entity.fields) {
-      final regex = RegExp('${field.name}\\s+([a-zA-Z0-9@._-]+)', caseSensitive: false);
-      final match = regex.firstMatch(text);
+      final pattern = RegExp(
+        '\\b${RegExp.escape(field.name)}\\b\\s*[:=]?\\s*(.*?)(?=\\s*[,;]\\s*|\\s+\\b(?:$otherFieldsPattern)\\b|\$)',
+        caseSensitive: false,
+      );
+      final match = pattern.firstMatch(text);
       if (match != null) {
-        collectedSlots[field.name] = _cast(match.group(1)!, field.type);
+        final val = match.group(1)!.trim();
+        if (val.isNotEmpty) {
+          collectedSlots[field.name] = _cast(val, field.type);
+        }
       }
     }
   }
 
   Future<String> _continueSlotFilling(String userInput) async {
-    final missing = _getMissingFields();
-    if (missing.isEmpty) return await _executeCreate();
+    final missingBefore = _getMissingFields();
+    if (missingBefore.isEmpty) return await _executeCreate();
 
-    final targetField = missing.first;
-    collectedSlots[targetField.name] = _cast(userInput.trim(), targetField.type);
+    _extractSlotsFromText(userInput, activeEntity!);
+
+    final missingNow = _getMissingFields();
+    // Si todavía falta el campo objetivo, asignar el valor directo o el prefijo anterior a campos nombrados
+    if (missingNow.contains(missingBefore.first)) {
+      final targetField = missingBefore.first;
+      var cleanVal = userInput.trim();
+      cleanVal = cleanVal.replaceAll(
+        RegExp('^(?:el\\s+|la\\s+|mi\\s+)?(?:${RegExp.escape(targetField.name)})?\\s*[:=]?\\s*', caseSensitive: false),
+        '',
+      );
+      final otherFieldsPattern = activeEntity!.fields.map((f) => RegExp.escape(f.name)).join('|');
+      final prefixMatch = RegExp('^(.*?)(?=\\s*[,;]\\s*|\\s+\\b(?:$otherFieldsPattern)\\b|\$)', caseSensitive: false).firstMatch(cleanVal);
+      final resolved = prefixMatch != null && prefixMatch.group(1)!.trim().isNotEmpty
+          ? prefixMatch.group(1)!.trim()
+          : cleanVal;
+      collectedSlots[targetField.name] = _cast(resolved, targetField.type);
+    }
 
     return await _checkRequiredSlots();
   }
@@ -595,19 +635,19 @@ class DialogStateMachine {
     try {
       final res = await http.post(
         uri,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(payload),
+        headers: {'Content-Type': 'application/json; charset=utf-8'},
+        body: utf8.encode(jsonEncode(payload)),
       );
 
       reset();
 
       if (res.statusCode == 201 || res.statusCode == 200) {
-        final decoded = jsonDecode(res.body);
+        final decoded = jsonDecode(utf8.decode(res.bodyBytes));
         final id = decoded is Map ? decoded['id'] : null;
         final idStr = id != null ? " con ID $id" : "";
         return "Registro de $entityName$idStr creado exitosamente en el servidor.";
       }
-      return "El servidor rechazó la solicitud (Código ${res.statusCode}).";
+      return "El servidor rechazó la solicitud para $entityName (Código ${res.statusCode}).";
     } catch (e) {
       reset();
       return "Error de red al registrar $entityName: $e";
@@ -622,7 +662,7 @@ class DialogStateMachine {
       final res = await http.get(uri);
       reset();
       if (res.statusCode == 200) {
-        final list = jsonDecode(res.body) as List;
+        final list = jsonDecode(utf8.decode(res.bodyBytes)) as List;
         if (list.isEmpty) {
           lastFetchedList = [];
           return "No hay registros disponibles para ${entity.entityName}.";
@@ -651,7 +691,7 @@ class DialogStateMachine {
           return "Se encontraron ${list.length} registros para ${entity.entityName}. Los primeros 5 son: $top5; y $remaining registros más. Podés verlos todos en el Explorador de Base de Datos o consultar uno por su nombre o posición.";
         }
       }
-      return "Error del servidor: HTTP ${res.statusCode}.";
+      return "Error del servidor al consultar ${entity.entityName}: HTTP ${res.statusCode}.";
     } catch (e) {
       reset();
       return "Fallo de conexión al consultar ${entity.entityName}: $e";
@@ -666,16 +706,16 @@ class DialogStateMachine {
       final res = await http.get(uri);
       reset();
       if (res.statusCode == 200) {
-        final item = jsonDecode(res.body) as Map<String, dynamic>;
+        final item = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
         final details = item.entries
             .map((e) => "${e.key}: ${e.value}")
             .join(', ');
         return "Detalle de ${entity.entityName} (ID $id): $details";
       }
-      if (res.statusCode == 404) {
+      if (res.statusCode == 404 || res.statusCode == 500) {
         return "No se encontró ningún registro de ${entity.entityName} con ID $id.";
       }
-      return "Error del servidor: HTTP ${res.statusCode}.";
+      return "Error del servidor al consultar ${entity.entityName}: HTTP ${res.statusCode}.";
     } catch (e) {
       reset();
       return "Fallo de conexión al consultar ${entity.entityName} $id: $e";
@@ -689,19 +729,35 @@ class DialogStateMachine {
     try {
       final payload = Map<String, dynamic>.from(collectedSlots);
       lastExecutedPayload = payload;
+
+      // Si el servidor responde 200 al GET, combinar los campos existentes para satisfacer validaciones completas del PUT
+      try {
+        final getRes = await http.get(uri);
+        if (getRes.statusCode == 200) {
+          final existing = jsonDecode(utf8.decode(getRes.bodyBytes));
+          if (existing is Map<String, dynamic>) {
+            final merged = Map<String, dynamic>.from(existing);
+            merged.remove('id');
+            merged.addAll(collectedSlots);
+            payload.addAll(merged);
+            lastExecutedPayload = payload;
+          }
+        }
+      } catch (_) {}
+
       final res = await http.put(
         uri,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(payload),
+        headers: {'Content-Type': 'application/json; charset=utf-8'},
+        body: utf8.encode(jsonEncode(payload)),
       );
       reset();
       if (res.statusCode == 200) {
         return "Registro de ${entity.entityName} con ID $id actualizado exitosamente.";
       }
-      if (res.statusCode == 404) {
+      if (res.statusCode == 404 || res.statusCode == 500) {
         return "No se encontró ningún registro de ${entity.entityName} con ID $id para actualizar.";
       }
-      return "El servidor rechazó la actualización (Código ${res.statusCode}).";
+      return "El servidor rechazó la actualización para ${entity.entityName} (Código ${res.statusCode}).";
     } catch (e) {
       reset();
       return "Error de red al actualizar ${entity.entityName} $id: $e";
@@ -718,7 +774,7 @@ class DialogStateMachine {
       if (res.statusCode == 204 || res.statusCode == 200) {
         return "Registro de ${entity.entityName} con ID $id eliminado exitosamente.";
       }
-      if (res.statusCode == 404) {
+      if (res.statusCode == 404 || res.statusCode == 500) {
         return "No se encontró ningún registro de ${entity.entityName} con ID $id para eliminar.";
       }
       if (res.statusCode == 409) {

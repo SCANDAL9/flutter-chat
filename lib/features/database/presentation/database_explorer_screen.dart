@@ -51,7 +51,7 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
     try {
       final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 5));
       if (res.statusCode == 200) {
-        final list = jsonDecode(res.body) as List;
+        final list = jsonDecode(utf8.decode(res.bodyBytes)) as List;
         setState(() {
           _tableData[entity.entityName] = list.map((item) => Map<String, dynamic>.from(item as Map)).toList();
           _isLoadingTable[entity.entityName] = false;
@@ -110,6 +110,8 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
         vm.ttsService.speak(msg);
         _showFeedback(msg, isSuccess: true);
         await _fetchTableData(entity);
+      } else if (res.statusCode == 404 || res.statusCode == 500) {
+        _showFeedback("El registro con ID $id no existe en el servidor.", isSuccess: false);
       } else {
         final err = "Error al eliminar: Código ${res.statusCode}";
         _showFeedback(err, isSuccess: false);
@@ -148,7 +150,7 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
       if (isFk) {
         final rel = _findRelatedEntity(field.name, vm.entities);
         if (rel != null && !_tableData.containsKey(rel.entityName)) {
-          _fetchTableData(rel);
+          await _fetchTableData(rel);
         }
       } else if (field.type == 'boolean') {
         formValues[field.name] = false;
@@ -189,10 +191,12 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
 
                 // 1. Selector relacional para claves foráneas (*_id)
                 if (relEntity != null && relRecords != null && relRecords.isNotEmpty) {
+                  final hasMatchingVal = relRecords.any((item) => item['id'] == formValues[field.name]);
+                  final safeInitialVal = hasMatchingVal ? formValues[field.name] : null;
                   return Padding(
                     padding: const EdgeInsets.symmetric(vertical: 6),
                     child: DropdownButtonFormField<dynamic>(
-                      initialValue: formValues[field.name],
+                      initialValue: safeInitialVal,
                       dropdownColor: const Color(0xFF1E293B),
                       style: const TextStyle(color: Colors.white, fontSize: 13),
                       decoration: InputDecoration(
@@ -321,7 +325,27 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
                 backgroundColor: UmlStudioTokens.dodgerBlue,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               ),
-              onPressed: () => Navigator.pop(ctx, true),
+              onPressed: () {
+                for (final f in entity.fields) {
+                  if (f.name.toLowerCase() == 'id') continue;
+                  if (f.isRequired) {
+                    final isFk = f.name.toLowerCase().endsWith('_id') ||
+                        (f.name.length > 2 && f.name.endsWith('Id'));
+                    if (isFk && formValues[f.name] == null) {
+                      _showFeedback("El campo '${f.name}' es obligatorio.", isSuccess: false);
+                      return;
+                    }
+                    if (!isFk && f.type != 'boolean') {
+                      final val = controllers[f.name]?.text.trim() ?? '';
+                      if (val.isEmpty) {
+                        _showFeedback("El campo '${f.name}' es obligatorio.", isSuccess: false);
+                        return;
+                      }
+                    }
+                  }
+                }
+                Navigator.pop(ctx, true);
+              },
               child: const Text("Crear", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
             ),
           ],
@@ -355,8 +379,8 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
       try {
         final res = await http.post(
           Uri.parse(url),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode(payload),
+          headers: {'Content-Type': 'application/json; charset=utf-8'},
+          body: utf8.encode(jsonEncode(payload)),
         );
         if (res.statusCode == 200 || res.statusCode == 201) {
           final msg = "${entity.entityName} creado exitosamente.";
@@ -385,7 +409,7 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
         formValues[field.name] = record[field.name];
         final rel = _findRelatedEntity(field.name, vm.entities);
         if (rel != null && !_tableData.containsKey(rel.entityName)) {
-          _fetchTableData(rel);
+          await _fetchTableData(rel);
         }
       } else if (field.type == 'boolean') {
         formValues[field.name] = record[field.name] == true;
@@ -430,10 +454,12 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
 
                 // 1. Selector relacional para claves foráneas (*_id)
                 if (relEntity != null && relRecords != null && relRecords.isNotEmpty) {
+                  final hasMatchingVal = relRecords.any((item) => item['id'] == formValues[field.name]);
+                  final safeInitialVal = hasMatchingVal ? formValues[field.name] : null;
                   return Padding(
                     padding: const EdgeInsets.symmetric(vertical: 6),
                     child: DropdownButtonFormField<dynamic>(
-                      initialValue: formValues[field.name],
+                      initialValue: safeInitialVal,
                       dropdownColor: const Color(0xFF1E293B),
                       style: const TextStyle(color: Colors.white, fontSize: 13),
                       decoration: InputDecoration(
@@ -552,7 +578,27 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
                 backgroundColor: UmlStudioTokens.dodgerBlue,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               ),
-              onPressed: () => Navigator.pop(ctx, true),
+              onPressed: () {
+                for (final f in entity.fields) {
+                  if (f.name.toLowerCase() == 'id') continue;
+                  if (f.isRequired) {
+                    final isFk = f.name.toLowerCase().endsWith('_id') ||
+                        (f.name.length > 2 && f.name.endsWith('Id'));
+                    if (isFk && formValues[f.name] == null) {
+                      _showFeedback("El campo '${f.name}' es obligatorio.", isSuccess: false);
+                      return;
+                    }
+                    if (!isFk && f.type != 'boolean') {
+                      final val = controllers[f.name]?.text.trim() ?? '';
+                      if (val.isEmpty) {
+                        _showFeedback("El campo '${f.name}' es obligatorio.", isSuccess: false);
+                        return;
+                      }
+                    }
+                  }
+                }
+                Navigator.pop(ctx, true);
+              },
               child: const Text("Guardar", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
             ),
           ],
@@ -584,8 +630,8 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
       try {
         final res = await http.put(
           Uri.parse(url),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode(payload),
+          headers: {'Content-Type': 'application/json; charset=utf-8'},
+          body: utf8.encode(jsonEncode(payload)),
         );
         if (res.statusCode == 200) {
           final msg = "Registro #$id de ${entity.entityName} actualizado.";
@@ -649,6 +695,11 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
         ),
         actions: [
           IconButton(
+            icon: const Icon(Icons.settings_ethernet_rounded, color: UmlStudioTokens.deepSkyBlue, size: 21),
+            tooltip: "Configurar Servidor",
+            onPressed: () => _showServerConfigDialog(vm),
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh_rounded, color: UmlStudioTokens.deepSkyBlue, size: 22),
             tooltip: "Actualizar datos",
             onPressed: () {
@@ -707,32 +758,100 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
     );
   }
 
+  Future<void> _showServerConfigDialog(ChatViewModel vm) async {
+    final controller = TextEditingController(text: vm.schemaRepo.baseUrl);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0F172A),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
+        ),
+        title: const Row(
+          children: [
+            Icon(Icons.dns_rounded, color: UmlStudioTokens.deepSkyBlue, size: 20),
+            SizedBox(width: 8),
+            Text(
+              "Servidor Backend",
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "Dirección base o puerto del backend Spring Boot:",
+              style: TextStyle(fontSize: 12.5, color: UmlStudioTokens.darkTextMuted),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+              decoration: InputDecoration(
+                hintText: "http://localhost:9000",
+                hintStyle: const TextStyle(color: Colors.white30, fontSize: 13),
+                filled: true,
+                fillColor: Colors.white.withValues(alpha: 0.05),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Cancelar", style: TextStyle(color: UmlStudioTokens.darkTextMuted)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: UmlStudioTokens.dodgerBlue),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Guardar y Conectar", style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && controller.text.trim().isNotEmpty) {
+      await vm.updateBaseUrl(controller.text.trim());
+      await _refreshAllExpanded();
+      _showFeedback("Conectando con ${controller.text.trim()}...", isSuccess: true);
+    }
+  }
+
   Widget _buildEntityCard(EntityDescriptor entity) {
     final records = _tableData[entity.entityName] ?? [];
     final isLoading = _isLoadingTable[entity.entityName] ?? false;
     final error = _tableErrors[entity.entityName];
     final isExpanded = _expandedTables.contains(entity.entityName);
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 14),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0F172A).withValues(alpha: 0.85),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: isExpanded ? UmlStudioTokens.dodgerBlue.withValues(alpha: 0.40) : Colors.white.withValues(alpha: 0.08),
-          width: 1.0,
-        ),
-        boxShadow: const [
-          BoxShadow(
-            color: Colors.black26,
-            blurRadius: 10,
-            offset: Offset(0, 4),
+    return Material(
+      color: const Color(0xFF0F172A).withValues(alpha: 0.85),
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isExpanded ? UmlStudioTokens.dodgerBlue.withValues(alpha: 0.40) : Colors.white.withValues(alpha: 0.08),
+            width: 1.0,
           ),
-        ],
-      ),
-      child: Theme(
-        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-        child: ExpansionTile(
+          boxShadow: const [
+            BoxShadow(
+              color: Colors.black26,
+              blurRadius: 10,
+              offset: Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Theme(
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
           initiallyExpanded: isExpanded,
           onExpansionChanged: (expanded) {
             setState(() {
@@ -845,6 +964,7 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
           ],
         ),
       ),
+      ),
     );
   }
 
@@ -883,20 +1003,25 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  IconButton(
-                    icon: const Icon(Icons.edit_outlined, size: 18, color: UmlStudioTokens.deepSkyBlue),
-                    tooltip: "Modificar",
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                    onPressed: () => _showEditDialog(entity, record),
+                  SizedBox(
+                    width: 38,
+                    height: 38,
+                    child: IconButton(
+                      icon: const Icon(Icons.edit_outlined, size: 19, color: UmlStudioTokens.deepSkyBlue),
+                      tooltip: "Modificar",
+                      padding: const EdgeInsets.all(8),
+                      onPressed: () => _showEditDialog(entity, record),
+                    ),
                   ),
-                  const SizedBox(width: 12),
-                  IconButton(
-                    icon: const Icon(Icons.delete_outline_rounded, size: 18, color: UmlStudioTokens.danger),
-                    tooltip: "Eliminar",
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                    onPressed: () async {
+                  const SizedBox(width: 4),
+                  SizedBox(
+                    width: 38,
+                    height: 38,
+                    child: IconButton(
+                      icon: const Icon(Icons.delete_outline_rounded, size: 19, color: UmlStudioTokens.danger),
+                      tooltip: "Eliminar",
+                      padding: const EdgeInsets.all(8),
+                      onPressed: () async {
                       final ok = await showDialog<bool>(
                         context: context,
                         builder: (ctx) => AlertDialog(
@@ -923,6 +1048,7 @@ class _DatabaseExplorerScreenState extends State<DatabaseExplorerScreen> {
                         await _deleteRecord(entity, id);
                       }
                     },
+                  ),
                   ),
                 ],
               ),

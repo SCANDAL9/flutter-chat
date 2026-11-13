@@ -57,3 +57,7 @@ backend_generated/
 real_generated_backend/
 scripts/
 
+
+# Direnv
+.direnv/
+.envrc.local
